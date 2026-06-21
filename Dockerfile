@@ -163,14 +163,18 @@ if "libvlc-all') using project" in s:
     print("root build.gradle: libvlc substitution already present"); sys.exit(0)
 # allprojects -> reaches :application:app (where native-lib merge runs) too.
 block = """
-// #3346: force the locally-built (patched) libvlc everywhere instead of the
-// prebuilt Maven libvlc-all (which lacks our fontconfig fix and collides with
-// the local libvlc.so during native-lib merge).
+// #3346: (a) force the locally-built (patched) libvlc everywhere instead of the
+// prebuilt Maven libvlc-all (lacks our fix; collides with the local libvlc.so at
+// native-lib merge); (b) disable lint — building libvlc's release variant trips
+// Gradle 9 strict task-validation in its lint-model tasks
 allprojects {
     configurations.all {
         resolutionStrategy.dependencySubstitution {
             substitute module('org.videolan.android:libvlc-all') using project(':libvlcjni:libvlc')
         }
+    }
+    tasks.configureEach {
+        if (name.toLowerCase().contains('lint')) { enabled = false }
     }
 }
 """
