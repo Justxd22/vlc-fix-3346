@@ -14,7 +14,7 @@ on:
     branches: main
 
 env:
-  ABI: arm64-v8a
+  TARGET_ABI: arm64-v8a
   WORK: ${{ github.workspace }}/work
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
@@ -39,17 +39,17 @@ jobs:
           path: |
             work/**/contrib/tarballs/**
             work/**/contrib/contrib-android-*
-          key: contrib-${{ env.ABI }}-v1-${{ github.sha }}
+          key: contrib-${{ env.TARGET_ABI }}-v1-${{ github.sha }}
           restore-keys: |
-            contrib-${{ env.ABI }}-v1-
+            contrib-${{ env.TARGET_ABI }}-v1-
 
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-${{ env.ABI }}-${{ github.sha }}
+          key: ccache-${{ env.TARGET_ABI }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ env.ABI }}-
+            ccache-${{ env.TARGET_ABI }}-
 
       - name: Cache gradle
         uses: actions/cache@v4

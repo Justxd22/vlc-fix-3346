@@ -19,13 +19,16 @@
 # /system/fonts (fonts.conf + FONTCONFIG_PATH/XDG_CACHE_HOME). See README.
 set -euo pipefail
 
-ABI="${ABI:-arm64-v8a}"
+TARGET_ABI="${TARGET_ABI:-arm64-v8a}"
+# gmp's configure reads a bare $ABI (valid: 64/32); a leaked ABI=arm64-v8a
+# kills the contrib build. Make sure it isn't in the environment.
+unset ABI || true
 WORK="${WORK:-$PWD/work}"
 export CCACHE_DIR="${CCACHE_DIR:-$PWD/.ccache}"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$PWD/.gradle}"
 
 VLC_ANDROID_URL="https://code.videolan.org/videolan/vlc-android.git"
-COMMON="-vlc4 -a $ABI"
+COMMON="-vlc4 -a $TARGET_ABI"
 
 # get-vlc.sh applies VLC patches with `git am`, which needs a committer identity;
 # and as root the checkout dirs look "dubiously owned" to git. Settle both.
@@ -33,7 +36,7 @@ git config --global user.email "ci@vlc.local" 2>/dev/null || true
 git config --global user.name  "vlc ci"       2>/dev/null || true
 git config --global --add safe.directory '*'  2>/dev/null || true
 
-echo "==> PR A (fontconfig) | ABI=$ABI WORK=$WORK"
+echo "==> PR A (fontconfig) | ABI=$TARGET_ABI WORK=$WORK"
 mkdir -p "$WORK" "$CCACHE_DIR" "$GRADLE_USER_HOME"; cd "$WORK"
 
 # 1. vlc-android (orchestrator)
