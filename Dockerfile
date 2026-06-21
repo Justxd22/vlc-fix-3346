@@ -161,17 +161,24 @@ bash buildsystem/compile.sh -b -r $COMMON
 BUILD_RC=$?
 set -e
 
-# 5. Collect the release APK (tolerate a failing AAB/bundle tail).
-echo "==> collecting APK -> $OUT"
-APK="$(find "$VA_ROOT" -name '*.apk' -path '*outputs*' \( -path '*elease*' -o -name '*release*' \) \
-        ! -name '*unsigned*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
-[ -z "$APK" ] && APK="$(find "$VA_ROOT" -name '*.apk' -path '*outputs*' ! -name '*unsigned*' \
+# 5. Pick the $TARGET_ABI release APK and sign it.
+echo "==> selecting + signing $TARGET_ABI release APK -> $OUT"
+APK="$(find "$VA_ROOT" -path '*outputs*' -path '*elease*' -name "*$TARGET_ABI*.apk" \
         -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
 if [ -z "$APK" ]; then
-    echo "!! no APK produced (build rc=$BUILD_RC)"; exit "${BUILD_RC:-1}"
+    echo "!! no $TARGET_ABI release APK produced (build rc=$BUILD_RC); APKs found:"
+    find "$VA_ROOT" -path '*outputs*' -name '*.apk' -printf '   %p\n' 2>/dev/null
+    exit "${BUILD_RC:-1}"
 fi
-cp -v "$APK" "$OUT/"
-echo "==> done: $OUT/$(basename "$APK")"
+
+# zipalign + self-sign with the debug keystore so it installs.
+BT="$(ls -d "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/sdk/android-sdk-linux}}"/build-tools/* | sort -V | tail -1)"
+DEST="$OUT/$(basename "$APK")"
+"$BT/zipalign" -f -p 4 "$APK" "$DEST"
+"$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android \
+    --ks-key-alias androiddebugkey --key-pass pass:android "$DEST"
+"$BT/apksigner" verify "$DEST"
+echo "==> done (signed): $DEST"
 SCRIPT
 
 CMD ["bash", "/build.sh"]
