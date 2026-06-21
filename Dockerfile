@@ -150,7 +150,25 @@ s = s.replace(a3, "#endif\n    free( psz_fc_conf );\n#else\n    ass_set_fonts( "
 open(p, "w").write(s); print("libass.c: fontconfig config-path patch applied")
 PY
 
-# Force a rebuild of the affected contrib packages if a prior tree was cached.
+# 3d. the release/debug/signedRelease variants pull a
+#     PREBUILT libvlc from Maven (org.videolan.android:libvlc-all) — only the
+#     `dev` variant uses our locally-built project. Point release at the local
+#     libvlc so our patched, fontconfig-enabled build is actually shipped.
+APP_GRADLE="$VA_ROOT/application/vlc-android/build.gradle"
+[ -f "$APP_GRADLE" ] || { echo "!! $APP_GRADLE not found"; exit 2; }
+python3 - "$APP_GRADLE" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+if "releaseApi project(':libvlcjni:libvlc')" in s:
+    print("build.gradle: release already uses local libvlc"); sys.exit(0)
+# case-sensitive `releaseApi` does NOT match `signedReleaseApi`
+s2 = re.sub(r'releaseApi\s+"org\.videolan\.android:libvlc-all:[^"]*"',
+            "releaseApi project(':libvlcjni:libvlc')", s, count=1)
+if s2 == s: sys.exit("!! build.gradle releaseApi (libvlc-all) anchor not found")
+open(p, "w").write(s2); print("build.gradle: release -> local libvlc project")
+PY
+
+# Force the affected contrib packages to rebuild if a prior tree was cached.
 find "$LIBVLCJNI/vlc/contrib" -maxdepth 2 \( -name '.ass' -o -name '.fontconfig' \) -delete 2>/dev/null || true
 find "$LIBVLCJNI/vlc/contrib" -maxdepth 2 -type d -name 'ass-*' -exec rm -rf {} + 2>/dev/null || true
 
