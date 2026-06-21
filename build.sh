@@ -27,6 +27,12 @@ export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$PWD/.gradle}"
 VLC_ANDROID_URL="https://code.videolan.org/videolan/vlc-android.git"
 COMMON="-vlc4 -a $ABI"
 
+# get-vlc.sh applies VLC patches with `git am`, which needs a committer identity;
+# and as root the checkout dirs look "dubiously owned" to git. Settle both.
+git config --global user.email "ci@vlc.local" 2>/dev/null || true
+git config --global user.name  "vlc ci"       2>/dev/null || true
+git config --global --add safe.directory '*'  2>/dev/null || true
+
 echo "==> PR A (fontconfig) | ABI=$ABI WORK=$WORK"
 mkdir -p "$WORK" "$CCACHE_DIR" "$GRADLE_USER_HOME"; cd "$WORK"
 
