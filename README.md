@@ -1,32 +1,26 @@
-# fix #3346 by enabling fontconfig on Android
+# vlc-android #3346 fix — non-Latin ASS/SSA subtitles render instead of tofu
 
-The low-risk fix: re-enable **fontconfig** so libass regains codepoint-coverage
-font fallback (`get_fallback`). This is the exact path desktop VLC uses, proven
-to render Thai correctly.
+Thai, Arabic, Hebrew and Devanagari (and other non-Latin scripts) in `.ass`/`.ssa`
+subtitles render as empty boxes on VLC for Android. Root cause: those subtitles go
+through **libass**, which on Android is built **without fontconfig** and falls back
+to a single hardcoded font (`NotoSansCJK`) that lacks those scripts. **Verified
+fixed on-device** (Android 14): Thai/Arabic/Hebrew all render.
 
-## What the build changes (two coupled edits, applied by `build.sh`)
+## The fix — three edits (applied in `Dockerfile`)
 
-1. `libvlcjni/buildsystem/build-libvlc.sh` — remove `--disable-fontconfig` from
-   the contrib bootstrap, so the fontconfig contrib is built.
-2. `vlc/contrib/src/ass/rules.mak` — flip the Android branch
-   `WITH_FONTCONFIG = 0` → `1`, so libass is compiled against fontconfig
-   (`-Dfontconfig=enabled`, pulling in the `DEPS_ass += fontconfig`).
+1. **libvlcjni `build-libvlc.sh`** — drop `--disable-fontconfig` so the fontconfig
+   contrib is built.
+2. **vlc `contrib/src/ass/rules.mak`** — Android `WITH_FONTCONFIG 0 → 1` so libass
+   is linked against fontconfig.
+3. **vlc `modules/codec/libass.c`** — Android ships no default `fonts.conf`, so the
+   fontconfig provider would load zero fonts. Generate a minimal one at runtime
+   (pointing at `/system/fonts`, written to the app's `TMPDIR`) and pass its path
+   to `ass_set_fonts()` instead of `NULL`.
 
-Both are deterministic, anchored edits — see `build.sh`.
-
-## Files
-
-| File | Role |
-|---|---|
-| `build.sh` | applies the two edits, builds the arm64 debug APK |
-| `ci/build-fontconfig.yml` | GitHub Actions: build in the official container, **cache** contrib/ccache/gradle, upload the APK |
-| `fonts.conf` | runtime fontconfig config pointing at `/system/fonts` (see caveat) |
-
-## Local
+## Build
 
 ```bash
-docker run --rm -v "$PWD:/src" -w /src \
-  registry.videolan.org/vlc-debian-android:20260611083443 \
-  bash fixA/build.sh
-# APK under work/vlc-android/.../outputs/apk/
+docker build -t vlc3346 .
+docker run --rm -v "$PWD/out:/out" vlc3346
+# => check current dir you should have ./out/*.apk
 ```

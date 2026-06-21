@@ -1,11 +1,8 @@
-# PR A — build VLC-Android (arm64) with fontconfig enabled and upload the APK.
+# Build the vlc-android #3346 fix (signed release APK) and upload it.
 #
-# Runs inside VideoLAN's official Android build image (SDK + NDK + host tools).
-# Caches the expensive bits (contrib tarballs, the built contrib tree, ccache,
-# gradle) so re-runs are fast. All build state is under $GITHUB_WORKSPACE so the
-# cache action — which runs on the host — can see the container's files.
-#
-# Place at .github/workflows/build-fontconfig.yml on the fork carrying PR A.
+# Uses the SAME Dockerfile as local builds: build the image, then `docker run`
+# it with the build caches bind-mounted into the workspace so actions/cache can
+# persist them between runs.
 name: build-fontconfig-3346
 
 on:
@@ -15,63 +12,45 @@ on:
 
 env:
   TARGET_ABI: arm64-v8a
-  WORK: ${{ github.workspace }}/work
-  CCACHE_DIR: ${{ github.workspace }}/.ccache
-  GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      # Prebuilt VLC Android image (same pin as libvlcjni CI). Alternatively
-      # build from fixB/build/Dockerfile's FROM line.
-      image: registry.videolan.org/vlc-debian-android:20260611083443
-      options: --user root
     steps:
       - uses: actions/checkout@v4
 
-      # --- caches -----------------------------------------------------------
-      # Big win: the built contrib (libass/fontconfig/harfbuzz/...) + downloaded
-      # source tarballs. Keyed per-ABI; restore-keys grabs the newest prior tree.
-      - name: Cache contrib (built + tarballs)
+      # contrib (the long pole) + ccache + gradle + cloned sources. restore-keys
+      # reuses the newest prior cache; a fresh one saves at the end of the run.
+      - name: Cache build state
         uses: actions/cache@v4
         with:
           path: |
-            work/**/contrib/tarballs/**
-            work/**/contrib/contrib-android-*
-          key: contrib-${{ env.TARGET_ABI }}-v1-${{ github.sha }}
+            work
+            .ccache
+            .gradle
+          key: vlc3346-${{ env.TARGET_ABI }}-${{ github.sha }}
           restore-keys: |
-            contrib-${{ env.TARGET_ABI }}-v1-
+            vlc3346-${{ env.TARGET_ABI }}-
 
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: .ccache
-          key: ccache-${{ env.TARGET_ABI }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ env.TARGET_ABI }}-
+      - name: Build image
+        run: docker build -t vlc3346 .
 
-      - name: Cache gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            .gradle/caches
-            .gradle/wrapper
-          key: gradle-${{ github.sha }}
-          restore-keys: |
-            gradle-
-
-      # --- build ------------------------------------------------------------
-      - name: Build (fontconfig enabled)
-        run: bash build.sh
-
-      - name: Collect APK
+      - name: Build APK
         run: |
-          mkdir -p out
-          find . -name '*.apk' -path '*outputs*' -exec cp -v {} out/ \;
+          mkdir -p out work .ccache .gradle
+          docker run --rm \
+            -e TARGET_ABI=${{ env.TARGET_ABI }} \
+            -v "$PWD/out:/out" \
+            -v "$PWD/work:/work" \
+            -v "$PWD/.ccache:/ccache" \
+            -v "$PWD/.gradle:/gradle" \
+            vlc3346
+          # container wrote as root; make the caches/artifacts readable for
+          # actions/cache + upload (both run as the runner user).
+          sudo chown -R "$(id -u):$(id -g)" out work .ccache .gradle || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: vlc-3346-fontconfig-arm64-apk
+          name: vlc-3346-release-apk
           path: out/*.apk
           if-no-files-found: error

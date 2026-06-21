@@ -1,43 +1,61 @@
+# syntax=docker/dockerfile:1
+# vlc-android #3346 fix
+#
+# Local:
+#   docker build -t vlc3346 .
+#   docker run --rm -v "$PWD/out:/out" vlc3346
+#   => ./out/*.apk
+#
+FROM registry.videolan.org/vlc-debian-android:20260611083443
+USER root
+
+ENV WORK=/work OUT=/out CCACHE_DIR=/ccache GRADLE_USER_HOME=/gradle
+
+COPY <<'SCRIPT' /build.sh
 #!/usr/bin/env bash
 #
-# PR A: build VLC-Android (arm64-v8a, VLC 4 / master line) with fontconfig
-# ENABLED, so libass regains codepoint-coverage fallback. Two coupled edits:
-#
-#   1. libvlcjni build-libvlc.sh : drop `--disable-fontconfig` from the contrib
-#      bootstrap, so the fontconfig contrib actually gets built.
-#   2. vlc contrib/src/ass/rules.mak : flip the Android branch WITH_FONTCONFIG
-#      0 -> 1, so libass itself is compiled against fontconfig.
-#
-# Flow: `--init` fetches libvlcjni + vlc then exits; we edit;
-# `-b` rebuilds while leaving our custom sources untouched. `-vlc4` selects the
-# master line our edit anchors come from.
-#
-# Runs in registry.videolan.org/vlc-debian-android:*. Build state under $WORK so
-# CI can cache contrib/ccache/gradle.
-#
-# NOTE: a fontconfig-enabled libass also needs a runtime config pointing at
-# /system/fonts (fonts.conf + FONTCONFIG_PATH/XDG_CACHE_HOME). See README.
+# Build VLC-Android (arm64-v8a, VLC 4 / master) with the #3346 fix: non-Latin
+# (Thai/Arabic/Hebrew/Devanagari) ASS/SSA subtitles render instead of tofu.
+# Three edits, applied to freshly-fetched sources:
+#   1. libvlcjni build-libvlc.sh : drop `--disable-fontconfig` (build fontconfig).
+#   2. vlc contrib/src/ass/rules.mak : Android WITH_FONTCONFIG 0 -> 1 (link it).
+#   3. vlc modules/codec/libass.c : write a minimal fonts.conf at runtime and pass
+#      it to ass_set_fonts() (Android has no default config). Verified on-device.
+# `--init` fetches sources then exits; we edit; `-b -r` builds a signed *release*
+# APK. `-vlc4` selects the master line the anchors match.
 set -euo pipefail
 
 TARGET_ABI="${TARGET_ABI:-arm64-v8a}"
-# gmp's configure reads a bare $ABI (valid: 64/32); a leaked ABI=arm64-v8a
-# kills the contrib build. Make sure it isn't in the environment.
+# gmp's configure reads a bare $ABI (valid: 64/32); 
 unset ABI || true
 WORK="${WORK:-$PWD/work}"
+OUT="${OUT:-$PWD/out}"
 export CCACHE_DIR="${CCACHE_DIR:-$PWD/.ccache}"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$PWD/.gradle}"
+export HOME="${HOME:-/root}"
 
 VLC_ANDROID_URL="https://code.videolan.org/videolan/vlc-android.git"
 COMMON="-vlc4 -a $TARGET_ABI"
 
-# get-vlc.sh applies VLC patches with `git am`, which needs a committer identity;
-# and as root the checkout dirs look "dubiously owned" to git. Settle both.
+# get-vlc.sh applies VLC patches with `git am` (needs an identity); as root the
+# checkout dirs look "dubiously owned" to git. Settle both.
 git config --global user.email "ci@vlc.local" 2>/dev/null || true
 git config --global user.name  "vlc ci"       2>/dev/null || true
 git config --global --add safe.directory '*'  2>/dev/null || true
 
-echo "==> PR A (fontconfig) | ABI=$TARGET_ABI WORK=$WORK"
-mkdir -p "$WORK" "$CCACHE_DIR" "$GRADLE_USER_HOME"; cd "$WORK"
+echo "==> #3346 fix build | ABI=$TARGET_ABI WORK=$WORK OUT=$OUT"
+mkdir -p "$WORK" "$OUT" "$CCACHE_DIR" "$GRADLE_USER_HOME"; cd "$WORK"
+
+# Release builds need a signing key. compile.sh defaults to the Android debug
+# keystore (storepwd "android"); create it if the image lacks one so the release
+# APK is self-signed and installable.
+KEYSTORE="$HOME/.android/debug.keystore"
+if [ ! -f "$KEYSTORE" ]; then
+    mkdir -p "$HOME/.android"
+    keytool -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android \
+        -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
+        -keyalg RSA -keysize 2048 -validity 10000
+fi
 
 # 1. vlc-android (orchestrator)
 [ -d vlc-android ] || git clone "$VLC_ANDROID_URL"
@@ -76,9 +94,8 @@ else:
     sys.exit("!! ass/rules.mak android anchor not found")
 PY
 
-# 3c. runtime config: VLC passes config=NULL to ass_set_fonts, and Android has
-#     no default fonts.conf, so the fontconfig provider loads zero fonts. Make
-#     VLC write a minimal fonts.conf (pointing at /system/fonts) and pass it.
+# 3c. runtime config: make VLC write a minimal fonts.conf (-> /system/fonts) and
+#     pass it to ass_set_fonts() instead of NULL.
 LIBASS_C="$LIBVLCJNI/vlc/modules/codec/libass.c"
 [ -f "$LIBASS_C" ] || { echo "!! $LIBASS_C not found"; exit 2; }
 python3 - "$LIBASS_C" <<'PY'
@@ -137,9 +154,24 @@ PY
 find "$LIBVLCJNI/vlc/contrib" -maxdepth 2 \( -name '.ass' -o -name '.fontconfig' \) -delete 2>/dev/null || true
 find "$LIBVLCJNI/vlc/contrib" -maxdepth 2 -type d -name 'ass-*' -exec rm -rf {} + 2>/dev/null || true
 
-# 4. Full build with our custom sources (-b leaves vlc/libvlcjni untouched).
-echo "==> Building (contrib -> libvlc -> jni -> app) ..."
-bash buildsystem/compile.sh -b $COMMON
+# 4. Full release build (-b keeps our custom sources; -r => signed Release APK).
+echo "==> Building release (contrib -> libvlc -> jni -> app) ..."
+set +e
+bash buildsystem/compile.sh -b -r $COMMON
+BUILD_RC=$?
+set -e
 
-echo "==> APKs:"
-find "$VA_ROOT" -name '*.apk' -path '*outputs*' -printf '%p\n'
+# 5. Collect the release APK (tolerate a failing AAB/bundle tail).
+echo "==> collecting APK -> $OUT"
+APK="$(find "$VA_ROOT" -name '*.apk' -path '*outputs*' \( -path '*elease*' -o -name '*release*' \) \
+        ! -name '*unsigned*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+[ -z "$APK" ] && APK="$(find "$VA_ROOT" -name '*.apk' -path '*outputs*' ! -name '*unsigned*' \
+        -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+if [ -z "$APK" ]; then
+    echo "!! no APK produced (build rc=$BUILD_RC)"; exit "${BUILD_RC:-1}"
+fi
+cp -v "$APK" "$OUT/"
+echo "==> done: $OUT/$(basename "$APK")"
+SCRIPT
+
+CMD ["bash", "/build.sh"]

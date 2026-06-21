@@ -1,0 +1,6 @@
+# Keep the build context tiny — caches/outputs live in volumes, not the image.
+.git
+work
+out
+.ccache
+.gradle
