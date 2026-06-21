@@ -1,0 +1,76 @@
+# PR A — build VLC-Android (arm64) with fontconfig enabled and upload the APK.
+#
+# Runs inside VideoLAN's official Android build image (SDK + NDK + host tools).
+# Caches the expensive bits (contrib tarballs, the built contrib tree, ccache,
+# gradle) so re-runs are fast. All build state is under $GITHUB_WORKSPACE so the
+# cache action — which runs on the host — can see the container's files.
+#
+# Place at .github/workflows/build-fontconfig.yml on the fork carrying PR A.
+name: build-fontconfig-3346
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ fix-3346-fontconfig ]
+
+env:
+  ABI: arm64-v8a
+  WORK: ${{ github.workspace }}/work
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      # Prebuilt VLC Android image (same pin as libvlcjni CI). Alternatively
+      # build from fixB/build/Dockerfile's FROM line.
+      image: registry.videolan.org/vlc-debian-android:20260611083443
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- caches -----------------------------------------------------------
+      # Big win: the built contrib (libass/fontconfig/harfbuzz/...) + downloaded
+      # source tarballs. Keyed per-ABI; restore-keys grabs the newest prior tree.
+      - name: Cache contrib (built + tarballs)
+        uses: actions/cache@v4
+        with:
+          path: |
+            work/**/contrib/tarballs/**
+            work/**/contrib/contrib-android-*
+          key: contrib-${{ env.ABI }}-v1-${{ github.sha }}
+          restore-keys: |
+            contrib-${{ env.ABI }}-v1-
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ env.ABI }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ env.ABI }}-
+
+      - name: Cache gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            .gradle/caches
+            .gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-
+
+      # --- build ------------------------------------------------------------
+      - name: Build (fontconfig enabled)
+        run: bash build.sh
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          find . -name '*.apk' -path '*outputs*' -exec cp -v {} out/ \;
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vlc-3346-fontconfig-arm64-apk
+          path: out/*.apk
+          if-no-files-found: error
