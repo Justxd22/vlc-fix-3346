@@ -26,6 +26,7 @@ jobs:
       # Prebuilt VLC Android image (same pin as libvlcjni CI). Alternatively
       # build from fixB/build/Dockerfile's FROM line.
       image: registry.videolan.org/vlc-debian-android:20260611083443
+      options: --user root
     steps:
       - uses: actions/checkout@v4
 
