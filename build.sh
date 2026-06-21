@@ -76,6 +76,63 @@ else:
     sys.exit("!! ass/rules.mak android anchor not found")
 PY
 
+# 3c. runtime config: VLC passes config=NULL to ass_set_fonts, and Android has
+#     no default fonts.conf, so the fontconfig provider loads zero fonts. Make
+#     VLC write a minimal fonts.conf (pointing at /system/fonts) and pass it.
+LIBASS_C="$LIBVLCJNI/vlc/modules/codec/libass.c"
+[ -f "$LIBASS_C" ] || { echo "!! $LIBASS_C not found"; exit 2; }
+python3 - "$LIBASS_C" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+if "psz_fc_conf" in s:
+    print("libass.c: already patched"); sys.exit(0)
+
+block = r'''    char *psz_fc_conf = NULL;
+#if defined(__ANDROID__)
+    /* Android ships no fontconfig config file, so libass's fontconfig provider
+     * loads no fonts and non-Latin scripts (Thai/Arabic/Hebrew/Devanagari) fall
+     * back to tofu. Write a minimal config pointing at the system font dirs and
+     * hand it to ass_set_fonts(). (vlc-android #3346) */
+    {
+        const char *psz_tmp = getenv( "TMPDIR" );
+        if( psz_tmp != NULL
+         && asprintf( &psz_fc_conf, "%s/vlc-fonts.conf", psz_tmp ) >= 0 )
+        {
+            FILE *fc = fopen( psz_fc_conf, "wt" );
+            if( fc != NULL )
+            {
+                fprintf( fc,
+                    "<?xml version=\"1.0\"?>\n"
+                    "<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n"
+                    "<fontconfig>\n"
+                    " <dir>/system/fonts</dir>\n"
+                    " <dir>/product/fonts</dir>\n"
+                    " <dir>/apex/com.android.i18n/etc/fonts</dir>\n"
+                    " <cachedir>%s/fontconfig</cachedir>\n"
+                    "</fontconfig>\n", psz_tmp );
+                fclose( fc );
+            }
+            else { free( psz_fc_conf ); psz_fc_conf = NULL; }
+        }
+    }
+#endif
+'''
+
+a1 = "#ifdef HAVE_FONTCONFIG\n#if defined(_WIN32)"
+a2 = "ASS_FONTPROVIDER_AUTODETECT, NULL, 1 );"
+a3 = ("#endif\n#else\n    ass_set_fonts( p_renderer, psz_font, psz_family, "
+      "ASS_FONTPROVIDER_AUTODETECT, NULL, 0 );")
+for a in (a1, a2, a3):
+    if a not in s: sys.exit("!! libass.c anchor not found:\n" + a)
+
+s = s.replace(a1, "#ifdef HAVE_FONTCONFIG\n" + block + "#if defined(_WIN32)", 1)
+s = s.replace(a2, "ASS_FONTPROVIDER_AUTODETECT, psz_fc_conf, 1 );", 1)
+s = s.replace(a3, "#endif\n    free( psz_fc_conf );\n#else\n    ass_set_fonts( "
+                  "p_renderer, psz_font, psz_family, "
+                  "ASS_FONTPROVIDER_AUTODETECT, NULL, 0 );", 1)
+open(p, "w").write(s); print("libass.c: fontconfig config-path patch applied")
+PY
+
 # Force a rebuild of the affected contrib packages if a prior tree was cached.
 find "$LIBVLCJNI/vlc/contrib" -maxdepth 2 \( -name '.ass' -o -name '.fontconfig' \) -delete 2>/dev/null || true
 find "$LIBVLCJNI/vlc/contrib" -maxdepth 2 -type d -name 'ass-*' -exec rm -rf {} + 2>/dev/null || true
