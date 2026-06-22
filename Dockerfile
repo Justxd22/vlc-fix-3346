@@ -14,15 +14,21 @@ ENV WORK=/work OUT=/out CCACHE_DIR=/ccache GRADLE_USER_HOME=/gradle
 COPY <<'SCRIPT' /build.sh
 #!/usr/bin/env bash
 #
-# Build VLC-Android (arm64-v8a, VLC 4 / master) with the #3346 fix: non-Latin
-# (Thai/Arabic/Hebrew/Devanagari) ASS/SSA subtitles render instead of tofu.
-# Three edits, applied to freshly-fetched sources:
-#   1. libvlcjni build-libvlc.sh : drop `--disable-fontconfig` (build fontconfig).
+# Build VLC-Android (arm64-v8a, *3.x STABLE* = tag 3.7.1 -> libvlcjni-3.x + vlc
+# 3.0.x) with the #3346 fix: non-Latin (Thai/Arabic/Hebrew/Devanagari) ASS/SSA
+# subtitles render instead of tofu. We target stable (not master) because master
+# 4.0.0-preview regresses storage permissions + network-drive browsing; the 3.7.1
+# release is the shipped, tested app. Four edits, applied to freshly-fetched srcs:
+#   1. libvlcjni compile-libvlc.sh : drop `--disable-fontconfig` (build fontconfig).
 #   2. vlc contrib/src/ass/rules.mak : Android WITH_FONTCONFIG 0 -> 1 (link it).
 #   3. vlc modules/codec/libass.c : write a minimal fonts.conf at runtime and pass
 #      it to ass_set_fonts() (Android has no default config). Verified on-device.
+#   4. root build.gradle : force the local patched libvlc over Maven libvlc-all
+#      (release pulls the prebuilt) + disable lint (Gradle 9 strict validation).
+# The 3.0 libass.c / rules.mak anchors are byte-identical to master, so edits 2-4
+# port unchanged; only edit 1's file (compile-libvlc.sh) + dropping `-vlc4` differ.
 # `--init` fetches sources then exits; we edit; `-b -r` builds a signed *release*
-# APK. `-vlc4` selects the master line the anchors match.
+# APK. NO `-vlc4` => compile.sh selects the 3.x stable line the anchors match.
 set -euo pipefail
 
 TARGET_ABI="${TARGET_ABI:-arm64-v8a}"
@@ -35,7 +41,8 @@ export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$PWD/.gradle}"
 export HOME="${HOME:-/root}"
 
 VLC_ANDROID_URL="https://code.videolan.org/videolan/vlc-android.git"
-COMMON="-vlc4 -a $TARGET_ABI"
+VLC_ANDROID_TAG="3.7.1"   # latest 3.7 stable (Play Store line); pulls libvlcjni-3.x + vlc 3.0.x
+COMMON="-a $TARGET_ABI"
 
 # get-vlc.sh applies VLC patches with `git am` (needs an identity); as root the
 # checkout dirs look "dubiously owned" to git. Settle both.
@@ -57,9 +64,14 @@ if [ ! -f "$KEYSTORE" ]; then
         -keyalg RSA -keysize 2048 -validity 10000
 fi
 
-# 1. vlc-android (orchestrator)
-[ -d vlc-android ] || git clone "$VLC_ANDROID_URL"
+# 1. vlc-android (orchestrator) @ tag 3.7.1
+if [ -d vlc-android ] && ! git -C vlc-android describe --tags --exact-match 2>/dev/null | grep -qx "$VLC_ANDROID_TAG"; then
+    echo "==> cached vlc-android is not $VLC_ANDROID_TAG -> removing for a clean 3.x fetch"
+    rm -rf vlc-android
+fi
+[ -d vlc-android ] || git clone -b "$VLC_ANDROID_TAG" "$VLC_ANDROID_URL"
 cd vlc-android
+git checkout "$VLC_ANDROID_TAG" 2>/dev/null || true   # ensure detached at the tag
 VA_ROOT="$PWD"
 
 # 2. Fetch-only: clones libvlcjni + vlc (+ gradle), then exits (GRADLE_SETUP).
@@ -67,7 +79,7 @@ echo "==> fetching sources (--init)"
 bash buildsystem/compile.sh --init $COMMON
 
 LIBVLCJNI="$VA_ROOT/libvlcjni"
-BUILD_LIBVLC="$LIBVLCJNI/buildsystem/build-libvlc.sh"
+BUILD_LIBVLC="$LIBVLCJNI/buildsystem/compile-libvlc.sh"
 ASS_RULES="$LIBVLCJNI/vlc/contrib/src/ass/rules.mak"
 [ -f "$BUILD_LIBVLC" ] || { echo "!! $BUILD_LIBVLC not found after --init"; exit 2; }
 [ -f "$ASS_RULES" ]    || { echo "!! $ASS_RULES not found after --init"; exit 2; }
@@ -78,7 +90,7 @@ import re, sys
 p = sys.argv[1]; s = open(p).read()
 new = re.sub(r'^[ \t]*--disable-fontconfig[ \t]*\\\n', '', s, count=1, flags=re.M)
 open(p, "w").write(new)
-print("build-libvlc.sh:", "--disable-fontconfig removed" if new != s else "already enabled")
+print("compile-libvlc.sh:", "--disable-fontconfig removed" if new != s else "already enabled")
 PY
 
 # 3b. libass contrib -> fontconfig on Android
