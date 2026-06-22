@@ -6,7 +6,8 @@
 #   docker run --rm -v "$PWD/out:/out" vlc3346
 #   => ./out/*.apk
 #
-FROM registry.videolan.org/vlc-debian-android:20260611083443
+# 3.x stable image: ships NDK 27/28
+FROM registry.videolan.org/vlc-debian-android-3.0:20250806120145
 USER root
 
 ENV WORK=/work OUT=/out CCACHE_DIR=/ccache GRADLE_USER_HOME=/gradle
