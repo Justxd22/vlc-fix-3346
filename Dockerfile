@@ -6,8 +6,14 @@
 #   docker run --rm -v "$PWD/out:/out" vlc3346
 #   => ./out/*.apk
 #
-# 3.x stable image: ships NDK 27/28
-FROM registry.videolan.org/vlc-debian-android-3.0:20250806120145
+# Image for the 3.x stable line, 64-bit (arm64-v8a). vlc 3.0's compile-libvlc.sh
+# gates the NDK: 64-bit needs NDK *27/28*, 32-bit needs NDK 21. The stock images
+# don't both fit -- `vlc-debian-android-3.0` ships NDK 21 (for the 32-bit jobs)
+# and current `vlc-debian-android` master ships NDK 29 ("got 29"/"got 21" fails).
+# vlc-android 3.7.1's CI builds its 64-bit ABIs with the 4.0 image pinned at this
+# Aug-2025 tag (IMAGE_40 / the default image for build-libvlc-arm64+x86_64), which
+# still shipped NDK 27/28 before master bumped to 29. That's the one we need.
+FROM registry.videolan.org/vlc-debian-android:20250806120145
 USER root
 
 ENV WORK=/work OUT=/out CCACHE_DIR=/ccache GRADLE_USER_HOME=/gradle
