@@ -16,11 +16,13 @@ COPY <<'SCRIPT' /build.sh
 #
 # Build VLC-Android (arm64-v8a, VLC 4 / master) with the #3346 fix: non-Latin
 # (Thai/Arabic/Hebrew/Devanagari) ASS/SSA subtitles render instead of tofu.
-# Three edits, applied to freshly-fetched sources:
+# Edits applied to freshly-fetched sources:
 #   1. libvlcjni build-libvlc.sh : drop `--disable-fontconfig` (build fontconfig).
 #   2. vlc contrib/src/ass/rules.mak : Android WITH_FONTCONFIG 0 -> 1 (link it).
-#   3. vlc modules/codec/libass.c : write a minimal fonts.conf at runtime and pass
-#      it to ass_set_fonts() (Android has no default config). Verified on-device.
+#   3. vlc contrib/src/fontconfig/rules.mak : add a HAVE_ANDROID branch that bakes
+#      the Android system font dirs into fontconfig's default config at build time
+#      (--with-default-fonts/--with-add-fonts), like the existing macOS branch.
+#      No runtime config file is written, so modules/codec/libass.c is untouched.
 # `--init` fetches sources then exits; we edit; `-b -r` builds a signed *release*
 # APK. `-vlc4` selects the master line the anchors match.
 set -euo pipefail
@@ -69,8 +71,10 @@ bash buildsystem/compile.sh --init $COMMON
 LIBVLCJNI="$VA_ROOT/libvlcjni"
 BUILD_LIBVLC="$LIBVLCJNI/buildsystem/build-libvlc.sh"
 ASS_RULES="$LIBVLCJNI/vlc/contrib/src/ass/rules.mak"
+FC_RULES="$LIBVLCJNI/vlc/contrib/src/fontconfig/rules.mak"
 [ -f "$BUILD_LIBVLC" ] || { echo "!! $BUILD_LIBVLC not found after --init"; exit 2; }
 [ -f "$ASS_RULES" ]    || { echo "!! $ASS_RULES not found after --init"; exit 2; }
+[ -f "$FC_RULES" ]     || { echo "!! $FC_RULES not found after --init"; exit 2; }
 
 # 3a. drop --disable-fontconfig from the contrib bootstrap args
 python3 - "$BUILD_LIBVLC" <<'PY'
@@ -94,60 +98,36 @@ else:
     sys.exit("!! ass/rules.mak android anchor not found")
 PY
 
-# 3c. runtime config: make VLC write a minimal fonts.conf (-> /system/fonts) and
-#     pass it to ass_set_fonts() instead of NULL.
-LIBASS_C="$LIBVLCJNI/vlc/modules/codec/libass.c"
-[ -f "$LIBASS_C" ] || { echo "!! $LIBASS_C not found"; exit 2; }
-python3 - "$LIBASS_C" <<'PY'
+# 3c. fontconfig contrib -> point it at the Android system font dirs at build
+#     time (mirrors the existing macOS branch). This bakes the dirs into
+#     fontconfig's default config so libass can keep passing NULL -- no runtime
+#     fonts.conf, no per-instance file writes. Cache under $HOME (the
+#     app-private dir libvlcjni sets) so it's built once and reused.
+python3 - "$FC_RULES" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-if "psz_fc_conf" in s:
-    print("libass.c: already patched"); sys.exit(0)
+if "ifdef HAVE_ANDROID" in s and "/system/fonts" in s:
+    print("fontconfig/rules.mak: already patched"); sys.exit(0)
 
-block = r'''    char *psz_fc_conf = NULL;
-#if defined(__ANDROID__)
-    /* Android ships no fontconfig config file, so libass's fontconfig provider
-     * loads no fonts and non-Latin scripts (Thai/Arabic/Hebrew/Devanagari) fall
-     * back to tofu. Write a minimal config pointing at the system font dirs and
-     * hand it to ass_set_fonts(). (vlc-android #3346) */
-    {
-        const char *psz_tmp = getenv( "TMPDIR" );
-        if( psz_tmp != NULL
-         && asprintf( &psz_fc_conf, "%s/vlc-fonts.conf", psz_tmp ) >= 0 )
-        {
-            FILE *fc = fopen( psz_fc_conf, "wt" );
-            if( fc != NULL )
-            {
-                fprintf( fc,
-                    "<?xml version=\"1.0\"?>\n"
-                    "<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n"
-                    "<fontconfig>\n"
-                    " <dir>/system/fonts</dir>\n"
-                    " <dir>/product/fonts</dir>\n"
-                    " <dir>/apex/com.android.i18n/etc/fonts</dir>\n"
-                    " <cachedir>%s/fontconfig</cachedir>\n"
-                    "</fontconfig>\n", psz_tmp );
-                fclose( fc );
-            }
-            else { free( psz_fc_conf ); psz_fc_conf = NULL; }
-        }
-    }
-#endif
-'''
+block = """
+ifdef HAVE_ANDROID
+# Android ships no global fonts.conf, so point fontconfig at the system font
+# directories at build time (https://source.android.com/docs/core/fonts).
+# The cache is kept under $HOME (the app-private dir set by libvlcjni) so it is
+# built once and reused across launches instead of rescanned every time.
+FONTCONFIG_CONF += \\
+\t--with-cache-dir=~/.cache/fontconfig \\
+\t--with-default-fonts=/system/fonts \\
+\t--with-add-fonts=/product/fonts,/data/fonts
+endif
+"""
 
-a1 = "#ifdef HAVE_FONTCONFIG\n#if defined(_WIN32)"
-a2 = "ASS_FONTPROVIDER_AUTODETECT, NULL, 1 );"
-a3 = ("#endif\n#else\n    ass_set_fonts( p_renderer, psz_font, psz_family, "
-      "ASS_FONTPROVIDER_AUTODETECT, NULL, 0 );")
-for a in (a1, a2, a3):
-    if a not in s: sys.exit("!! libass.c anchor not found:\n" + a)
-
-s = s.replace(a1, "#ifdef HAVE_FONTCONFIG\n" + block + "#if defined(_WIN32)", 1)
-s = s.replace(a2, "ASS_FONTPROVIDER_AUTODETECT, psz_fc_conf, 1 );", 1)
-s = s.replace(a3, "#endif\n    free( psz_fc_conf );\n#else\n    ass_set_fonts( "
-                  "p_renderer, psz_font, psz_family, "
-                  "ASS_FONTPROVIDER_AUTODETECT, NULL, 0 );", 1)
-open(p, "w").write(s); print("libass.c: fontconfig config-path patch applied")
+# Insert right after the existing macOS FONTCONFIG_CONF branch.
+anchor = "\t--with-add-fonts=/Library/Fonts,~/Library/Fonts\nendif\n"
+if anchor not in s:
+    sys.exit("!! fontconfig/rules.mak macOS anchor not found")
+s = s.replace(anchor, anchor + block, 1)
+open(p, "w").write(s); print("fontconfig/rules.mak: HAVE_ANDROID font dirs added")
 PY
 
 # 3d. Non-`dev` variants pull a PREBUILT libvlc from Maven (libvlc-all) — which

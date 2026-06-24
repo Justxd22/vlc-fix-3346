@@ -54,3 +54,76 @@ jobs:
           name: vlc-3346-release-apk
           path: out/*.apk
           if-no-files-found: error
+
+  # Install the freshly-built APK on an Android emulator and screenshot the
+  # multi-language subtitle. Needs an arm64 host so the arm64-v8a APK's native
+  # libs (libvlc.so) actually load -- an x86_64 emulator can't run them.
+  test:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download built APK
+        uses: actions/download-artifact@v4
+        with:
+          name: vlc-3346-release-apk
+          path: out
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run on emulator + screenshot subtitles
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: arm64-v8a
+          target: google_apis
+          profile: pixel_5
+          disable-animations: true
+          emulator-options: -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
+          script: |
+            set -x
+            adb wait-for-device
+            adb root || true
+            sleep 3
+            adb wait-for-device
+
+            # Push the committed 9.5KB blank clip + .ass to a Movies subdir
+            # (matching basenames -> VLC auto-loads the subtitle track).
+            adb shell mkdir -p /sdcard/Movies/repro3346
+            adb push reproduce/test_video.mp4 /sdcard/Movies/repro3346/test_video.mp4
+            adb push reproduce/test_video.ass /sdcard/Movies/repro3346/test_video.ass
+
+            # -g grants runtime permissions (storage) up front.
+            adb install -r -g out/*arm64-v8a*.apk
+
+            # Launch straight into the player on the pushed file.
+            adb shell am start -a android.intent.action.VIEW \
+              -d file:///sdcard/Movies/repro3346/test_video.mp4 -t video/mp4 \
+              -n org.videolan.vlc/org.videolan.vlc.gui.video.VideoPlayerActivity
+
+            # Video is 30s, one language every 3s. Launch + first-run fontconfig
+            # cache build adds latency, so just sweep the whole clip: a frame
+            # every 2s for ~34s catches every segment regardless of start offset.
+            mkdir -p shots
+            for i in $(seq -w 1 17); do
+              sleep 2
+              adb exec-out screencap -p > "shots/frame_${i}.png" || true
+            done
+
+            # Definitive provider check (see CLAUDE.md). GOOD = fontconfig provider.
+            adb logcat -d -s VLC VLC-std > shots/logcat.txt || true
+            grep -iE 'fontconfig|font provider|Using font|Failed to load' shots/logcat.txt || true
+
+      - name: Upload screenshots + logcat
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vlc-3346-emulator-screenshots
+          path: shots/
+          if-no-files-found: warn
